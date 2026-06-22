@@ -8,7 +8,14 @@
     "scheme": "myapp",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/expo.icon"
+      "icon": "./assets/expo.icon",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Necesitamos la c\u00e1mara para adjuntar fotos a las tareas.",
+        "NSPhotoLibraryUsageDescription": "Necesitamos la galer\u00eda para seleccionar fotos de tareas.",
+        "NSLocationWhenInUseUsageDescription": "Necesitamos tu ubicaci\u00f3n para asociarla al lugar de la tarea.",
+        "NSContactsUsageDescription": "Necesitamos contactos para seleccionar el responsable de la tarea.",
+        "NSCalendarsUsageDescription": "Necesitamos el calendario para crear recordatorios vinculados a tareas."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -17,7 +24,16 @@
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "CAMERA",
+        "READ_MEDIA_IMAGES",
+        "READ_EXTERNAL_STORAGE",
+        "ACCESS_FINE_LOCATION",
+        "READ_CONTACTS",
+        "WRITE_CALENDAR",
+        "READ_CALENDAR"
+      ]
     },
     "web": {
       "output": "static",
