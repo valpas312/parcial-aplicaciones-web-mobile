@@ -1,164 +1,119 @@
-import { Image } from 'expo-image';
-import React, { useEffect, useMemo, useState } from 'react';
-import { FlatList, StyleSheet, View } from 'react-native';
-import {
-  ActivityIndicator,
-  Button,
-  Card,
-  Chip,
-  Divider,
-  IconButton,
-  Searchbar,
-  Text,
-  useTheme,
-} from 'react-native-paper';
+import * as Calendar from 'expo-calendar';
+import * as Contacts from 'expo-contacts';
+import * as ImagePicker from 'expo-image-picker';
+import * as Location from 'expo-location';
+import React, { useMemo, useState } from 'react';
+import { Alert, FlatList, Platform, StyleSheet, View } from 'react-native';
+import { Button, Card, Text, TextInput, useTheme } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { Character, useCharacters } from '@/hooks/use-characters';
+import { TaskCard } from '@/components/task-card';
+import { AgendaTask, PermissionState, useTasksStore } from '@/store/tasks-store';
+import { permissionMessage } from '@/utils/agenda';
 
-const IMAGE_PLACEHOLDER = require('@/assets/images/icon.png');
+const permissionFromStatus = (status: string): PermissionState => (status === 'granted' ? 'granted' : 'denied');
 
 export default function HomeScreen() {
   const theme = useTheme();
-  const {
-    characters,
-    loading,
-    error,
-    page,
-    pages,
-    canGoNext,
-    canGoPrevious,
-    onSearch,
-    goToNextPage,
-    goToPreviousPage,
-    query,
-    reload,
-  } = useCharacters();
+  const tasks = useTasksStore((state) => state.tasks);
+  const addTask = useTasksStore((state) => state.addTask);
+  const updateTask = useTasksStore((state) => state.updateTask);
+  const [title, setTitle] = useState('');
+  const [permissions, setPermissions] = useState<Record<string, PermissionState>>({
+    cámara: 'pending', galería: 'pending', ubicación: 'pending', contactos: 'pending', calendario: 'pending',
+  });
 
-  const [selectedCharacter, setSelectedCharacter] = useState<Character | null>(null);
+  const permissionSummary = useMemo(
+    () => Object.entries(permissions).map(([resource, state]) => permissionMessage(resource, state)).join('\n'),
+    [permissions]
+  );
 
-  useEffect(() => {
-    if (selectedCharacter && !characters.some((character) => character.id === selectedCharacter.id)) {
-      setSelectedCharacter(null);
-    }
-  }, [characters, selectedCharacter]);
+  const setPermission = (resource: string, state: PermissionState) => setPermissions((prev) => ({ ...prev, [resource]: state }));
 
-  const statusColor = useMemo(() => {
-    if (!selectedCharacter) return theme.colors.outline;
-    return selectedCharacter.status === 'Alive'
-      ? '#24a148'
-      : selectedCharacter.status === 'Dead'
-        ? '#da1e28'
-        : '#878d96';
-  }, [selectedCharacter, theme.colors.outline]);
+  const showDenied = (resource: string) => Alert.alert('Permiso rechazado', permissionMessage(resource, 'denied'));
+
+  const createTask = () => {
+    const trimmed = title.trim();
+    if (!trimmed) return;
+    addTask({ title: trimmed, notes: 'Recordatorio creado desde la agenda', dueDate: new Date(Date.now() + 60 * 60 * 1000).toISOString() });
+    setTitle('');
+  };
+
+  const attachPhoto = async (task: AgendaTask, source: 'camera' | 'gallery') => {
+    const resource = source === 'camera' ? 'cámara' : 'galería';
+    const permission = source === 'camera'
+      ? await ImagePicker.requestCameraPermissionsAsync()
+      : await ImagePicker.requestMediaLibraryPermissionsAsync();
+    const state = permissionFromStatus(permission.status);
+    setPermission(resource, state);
+    if (state !== 'granted') return showDenied(resource);
+    const result = source === 'camera'
+      ? await ImagePicker.launchCameraAsync({ quality: 0.7 })
+      : await ImagePicker.launchImageLibraryAsync({ quality: 0.7, mediaTypes: ImagePicker.MediaTypeOptions.Images });
+    if (!result.canceled) updateTask(task.id, { imageUri: result.assets[0]?.uri });
+  };
+
+  const attachLocation = async (task: AgendaTask) => {
+    const permission = await Location.requestForegroundPermissionsAsync();
+    const state = permissionFromStatus(permission.status);
+    setPermission('ubicación', state);
+    if (state !== 'granted') return showDenied('ubicación');
+    const current = await Location.getCurrentPositionAsync({});
+    const [address] = await Location.reverseGeocodeAsync(current.coords).catch(() => []);
+    updateTask(task.id, {
+      location: {
+        latitude: current.coords.latitude,
+        longitude: current.coords.longitude,
+        label: address ? `${address.street ?? ''} ${address.city ?? ''}`.trim() : undefined,
+      },
+    });
+  };
+
+  const attachContact = async (task: AgendaTask) => {
+    const permission = await Contacts.requestPermissionsAsync();
+    const state = permissionFromStatus(permission.status);
+    setPermission('contactos', state);
+    if (state !== 'granted') return showDenied('contactos');
+    const result = await Contacts.presentContactPickerAsync();
+    if (result) updateTask(task.id, { contact: { id: result.id, name: result.name, phone: result.phoneNumbers?.[0]?.number, email: result.emails?.[0]?.email } });
+  };
+
+  const createCalendarEvent = async (task: AgendaTask) => {
+    const permission = await Calendar.requestCalendarPermissionsAsync();
+    const state = permissionFromStatus(permission.status);
+    setPermission('calendario', state);
+    if (state !== 'granted') return showDenied('calendario');
+    const calendars = await Calendar.getCalendarsAsync(Calendar.EntityTypes.EVENT);
+    const calendar = calendars.find((item) => item.allowsModifications) ?? calendars[0];
+    if (!calendar) return Alert.alert('Calendario no disponible', 'No se encontró un calendario editable en el dispositivo.');
+    const startDate = new Date(task.dueDate);
+    const eventId = await Calendar.createEventAsync(calendar.id, {
+      title: task.title,
+      notes: `${task.notes ?? ''}\nResponsable: ${task.contact?.name ?? 'Sin contacto'}`,
+      location: task.location?.label ?? (task.location ? `${task.location.latitude}, ${task.location.longitude}` : undefined),
+      startDate,
+      endDate: new Date(startDate.getTime() + 60 * 60 * 1000),
+      timeZone: Platform.OS === 'ios' ? undefined : 'UTC',
+    });
+    updateTask(task.id, { calendarEventId: eventId });
+  };
 
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: theme.colors.background }]} edges={['top']}>
       <View style={styles.container}>
-        <View style={styles.header}>
-          <Text variant="headlineMedium" style={styles.title}>
-            Rick & Morty Explorer
-          </Text>
-          <Text variant="bodyMedium" style={{ color: theme.colors.onSurfaceVariant }}>
-            Busca personajes, navega por páginas y revisa su estado actual.
-          </Text>
-        </View>
-
-        <Searchbar
-          placeholder="Buscar personaje"
-          value={query}
-          onChangeText={onSearch}
-          autoCorrect={false}
-          style={styles.search}
-        />
-
-        {error && (
-          <Card style={styles.errorCard}>
-            <Card.Content style={styles.errorContent}>
-              <Text variant="titleSmall">No pudimos cargar los personajes</Text>
-              <Text variant="bodyMedium">{error}</Text>
-              <Button mode="contained" onPress={reload} style={styles.retryButton}>
-                Reintentar
-              </Button>
-            </Card.Content>
-          </Card>
-        )}
-
+        <Text variant="headlineMedium" style={styles.title}>Agenda / Recordatorios</Text>
+        <Text variant="bodyMedium">Adjunta foto, ubicación GPS, responsable y evento del calendario a cada tarea.</Text>
+        <Card mode="contained"><Card.Content style={styles.form}>
+          <TextInput label="Nueva tarea" value={title} onChangeText={setTitle} />
+          <Button mode="contained" onPress={createTask}>Agregar tarea</Button>
+          <Text variant="bodySmall">{permissionSummary}</Text>
+        </Card.Content></Card>
         <FlatList
-          data={characters}
-          keyExtractor={(item) => item.id.toString()}
-          extraData={selectedCharacter?.id}
-          contentContainerStyle={styles.listContent}
-          ItemSeparatorComponent={Divider}
-          renderItem={({ item }) => {
-            const selected = selectedCharacter?.id === item.id;
-
-            return (
-              <Card
-                mode={selected ? 'elevated' : 'contained'}
-                style={[styles.card, selected && styles.selectedCard]}
-                onPress={() => setSelectedCharacter(item)}>
-                <Card.Content style={styles.characterRow}>
-                  <Image
-                    source={{ uri: item.image }}
-                    placeholder={IMAGE_PLACEHOLDER}
-                    contentFit="cover"
-                    transition={150}
-                    cachePolicy="disk"
-                    style={styles.avatar}
-                  />
-                  <View style={styles.characterInfo}>
-                    <Text variant="titleMedium" numberOfLines={1}>
-                      {item.name}
-                    </Text>
-                    <Text variant="bodyMedium" style={{ color: theme.colors.onSurfaceVariant }}>
-                      {item.species} • {item.gender}
-                    </Text>
-                    <Text variant="bodySmall" numberOfLines={1} style={{ color: theme.colors.onSurfaceVariant }}>
-                      {item.location.name}
-                    </Text>
-                  </View>
-                  <IconButton icon={selected ? 'star' : 'star-outline'} selected={selected} />
-                </Card.Content>
-              </Card>
-            );
-          }}
-          ListEmptyComponent={
-            !loading ? (
-              <Card mode="contained" style={styles.emptyCard}>
-                <Card.Content>
-                  <Text>No se encontraron personajes.</Text>
-                </Card.Content>
-              </Card>
-            ) : null
-          }
-          ListFooterComponent={loading ? <ActivityIndicator animating size="large" style={styles.loader} /> : null}
+          data={tasks}
+          keyExtractor={(item) => item.id}
+          renderItem={({ item }) => <TaskCard task={item} onTakePhoto={() => attachPhoto(item, 'camera')} onAttachPhoto={() => attachPhoto(item, 'gallery')} onAttachLocation={() => attachLocation(item)} onAttachContact={() => attachContact(item)} onCreateCalendarEvent={() => createCalendarEvent(item)} />}
+          ListEmptyComponent={<Text>No hay tareas cargadas.</Text>}
         />
-
-        <View style={[styles.pagination, { backgroundColor: theme.colors.elevation.level2 }]}>
-          <Button mode="outlined" disabled={!canGoPrevious} onPress={goToPreviousPage} compact>
-            Anterior
-          </Button>
-          <Chip compact>{`Página ${page} de ${pages}`}</Chip>
-          <Button mode="outlined" disabled={!canGoNext} onPress={goToNextPage} compact>
-            Siguiente
-          </Button>
-        </View>
-
-        {selectedCharacter && (
-          <Card mode="contained" style={styles.details}>
-            <Card.Content style={styles.detailContent}>
-              <View style={styles.detailHeader}>
-                <Text variant="titleMedium">Detalle seleccionado</Text>
-                <Chip compact style={{ backgroundColor: statusColor }} textStyle={{ color: 'white' }}>
-                  {selectedCharacter.status}
-                </Chip>
-              </View>
-              <Text>{selectedCharacter.name}</Text>
-              <Text>{`Ubicación: ${selectedCharacter.location.name}`}</Text>
-            </Card.Content>
-          </Card>
-        )}
       </View>
     </SafeAreaView>
   );
@@ -167,30 +122,6 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
   safeArea: { flex: 1 },
   container: { flex: 1, padding: 16, gap: 12 },
-  header: { gap: 4 },
   title: { fontWeight: '800' },
-  search: { marginBottom: 2 },
-  loader: { marginTop: 16 },
-  listContent: { flexGrow: 1, paddingBottom: 12 },
-  card: { marginVertical: 6 },
-  selectedCard: { borderWidth: 1, borderColor: '#6750a4' },
-  characterRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 8 },
-  avatar: { width: 64, height: 64, borderRadius: 18, backgroundColor: '#e7e0ec' },
-  characterInfo: { flex: 1, minWidth: 0, gap: 2 },
-  pagination: {
-    borderRadius: 20,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-  },
-  details: { marginTop: 2 },
-  detailContent: { gap: 4 },
-  detailHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 8 },
-  errorCard: { marginBottom: 4 },
-  errorContent: { gap: 6 },
-  retryButton: { marginTop: 4, alignSelf: 'flex-start' },
-  emptyCard: { marginTop: 12 },
+  form: { gap: 10 },
 });
